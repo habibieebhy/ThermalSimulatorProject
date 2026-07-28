@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable, Hashable, Iterable
 from contextlib import closing
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
 from .models import ProductRecord, ResearchResult
 from .settings import Settings
+
+
+T = TypeVar("T")
 
 
 SQLITE_SCHEMA = """
@@ -179,6 +183,69 @@ def _json(value: BaseModel | dict) -> str:
     return json.dumps(value, separators=(",", ":"), default=str)
 
 
+def _deduplicate(items: Iterable[T], identity: Callable[[T], Hashable]) -> list[T]:
+    """Keep the last occurrence of each deterministic entity ID."""
+
+    unique: dict[Hashable, T] = {}
+    for item in items:
+        unique[identity(item)] = item
+    return list(unique.values())
+
+
+def _migrate_sqlite_sources_primary_key(connection: sqlite3.Connection) -> None:
+    """Upgrade databases created when ``source_id`` was globally unique.
+
+    Source IDs are deterministic, so the same evidence can legitimately appear
+    in more than one research run. The correct identity in persistence is the
+    composite ``(source_id, run_id)`` key.
+    """
+
+    rows = connection.execute("PRAGMA table_info(sources)").fetchall()
+    primary_key_columns = [
+        str(row["name"])
+        for row in sorted(
+            (row for row in rows if int(row["pk"]) > 0),
+            key=lambda row: int(row["pk"]),
+        )
+    ]
+    if primary_key_columns == ["source_id", "run_id"]:
+        return
+    if primary_key_columns != ["source_id"]:
+        raise RuntimeError(
+            "Unsupported SQLite sources primary key: "
+            f"{primary_key_columns!r}. Back up the database before repairing it."
+        )
+
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys=OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE sources RENAME TO sources_legacy")
+        connection.execute(
+            """CREATE TABLE sources (
+                source_id TEXT NOT NULL,
+                run_id TEXT NOT NULL REFERENCES research_runs(run_id) ON DELETE CASCADE,
+                company_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (source_id, run_id)
+            )"""
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO sources
+            (source_id, run_id, company_id, url, payload_json)
+            SELECT source_id, run_id, company_id, url, payload_json
+            FROM sources_legacy"""
+        )
+        connection.execute("DROP TABLE sources_legacy")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys=ON")
+
+
 def _migrate_payload(payload: dict) -> dict:
     payload.pop("simulations", None)
     request = payload.get("request")
@@ -219,13 +286,27 @@ class SQLiteRepository:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as connection:
             connection.executescript(SQLITE_SCHEMA)
+            _migrate_sqlite_sources_primary_key(connection)
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
     def save(self, result: ResearchResult) -> None:
+        sources = _deduplicate(result.sources, lambda item: item.source_id)
+        assets = _deduplicate(result.assets, lambda item: item.asset_id)
+        products = _deduplicate(result.products, lambda item: item.product_id)
+        claims = _deduplicate(result.claims, lambda item: item.claim_id)
+        observations = _deduplicate(
+            result.observations, lambda item: item.observation_id
+        )
+        configurations = _deduplicate(
+            result.configurations, lambda item: item.configuration_id
+        )
+        graph_edges = _deduplicate(result.graph_edges, lambda item: item["edge_id"])
+
         with closing(self.connect()) as connection:
             connection.execute("BEGIN")
             connection.execute(
@@ -248,38 +329,38 @@ class SQLiteRepository:
                 connection.execute(f"DELETE FROM {table} WHERE run_id = ?", (result.run_id,))
             connection.executemany(
                 "INSERT INTO sources VALUES (?, ?, ?, ?, ?)",
-                [(x.source_id, result.run_id, x.company_id, x.url, _json(x)) for x in result.sources],
+                [(x.source_id, result.run_id, x.company_id, x.url, _json(x)) for x in sources],
             )
             connection.executemany(
                 "INSERT INTO assets VALUES (?, ?, ?, ?, ?, ?)",
                 [
                     (x.asset_id, result.run_id, x.source_id, x.company_id, x.content_sha256, _json(x))
-                    for x in result.assets
+                    for x in assets
                 ],
             )
             connection.executemany(
                 "INSERT INTO products VALUES (?, ?, ?, ?, ?)",
                 [
                     (x.product_id, result.run_id, x.company_id, x.name, _json(x))
-                    for x in result.products
+                    for x in products
                 ],
             )
             connection.executemany(
                 "INSERT INTO claims VALUES (?, ?, ?, ?, ?)",
-                [(x.claim_id, result.run_id, x.product_id, x.field_path, _json(x)) for x in result.claims],
+                [(x.claim_id, result.run_id, x.product_id, x.field_path, _json(x)) for x in claims],
             )
             connection.executemany(
                 "INSERT INTO observations VALUES (?, ?, ?, ?, ?, ?)",
                 [
                     (x.observation_id, result.run_id, x.source_id, x.asset_id, x.field_path, _json(x))
-                    for x in result.observations
+                    for x in observations
                 ],
             )
             connection.executemany(
                 "INSERT INTO configurations VALUES (?, ?, ?, ?, ?)",
                 [
                     (x.configuration_id, result.run_id, x.product_id, x.rank, _json(x))
-                    for x in result.configurations
+                    for x in configurations
                 ],
             )
             connection.executemany(
@@ -289,7 +370,7 @@ class SQLiteRepository:
                         x["edge_id"], result.run_id, x["source_node"], x["relation"],
                         x["target_node"], _json(x.get("properties", {})),
                     )
-                    for x in result.graph_edges
+                    for x in graph_edges
                 ],
             )
             connection.commit()
@@ -357,6 +438,18 @@ class PostgresRepository:
         return _json(value)
 
     def save(self, result: ResearchResult) -> None:
+        sources = _deduplicate(result.sources, lambda item: item.source_id)
+        assets = _deduplicate(result.assets, lambda item: item.asset_id)
+        products = _deduplicate(result.products, lambda item: item.product_id)
+        claims = _deduplicate(result.claims, lambda item: item.claim_id)
+        observations = _deduplicate(
+            result.observations, lambda item: item.observation_id
+        )
+        configurations = _deduplicate(
+            result.configurations, lambda item: item.configuration_id
+        )
+        graph_edges = _deduplicate(result.graph_edges, lambda item: item["edge_id"])
+
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -379,35 +472,35 @@ class PostgresRepository:
                     cursor.execute(f"DELETE FROM {table} WHERE run_id = %s", (result.run_id,))
                 cursor.executemany(
                     "INSERT INTO sources VALUES (%s,%s,%s,%s,%s::jsonb)",
-                    [(x.source_id, result.run_id, x.company_id, x.url, _json(x)) for x in result.sources],
+                    [(x.source_id, result.run_id, x.company_id, x.url, _json(x)) for x in sources],
                 )
                 cursor.executemany(
                     "INSERT INTO assets VALUES (%s,%s,%s,%s,%s,%s::jsonb)",
                     [
                         (x.asset_id, result.run_id, x.source_id, x.company_id, x.content_sha256, _json(x))
-                        for x in result.assets
+                        for x in assets
                     ],
                 )
                 cursor.executemany(
                     "INSERT INTO products VALUES (%s,%s,%s,%s,%s::jsonb)",
-                    [(x.product_id, result.run_id, x.company_id, x.name, _json(x)) for x in result.products],
+                    [(x.product_id, result.run_id, x.company_id, x.name, _json(x)) for x in products],
                 )
                 cursor.executemany(
                     "INSERT INTO claims VALUES (%s,%s,%s,%s,%s::jsonb)",
-                    [(x.claim_id, result.run_id, x.product_id, x.field_path, _json(x)) for x in result.claims],
+                    [(x.claim_id, result.run_id, x.product_id, x.field_path, _json(x)) for x in claims],
                 )
                 cursor.executemany(
                     "INSERT INTO observations VALUES (%s,%s,%s,%s,%s,%s::jsonb)",
                     [
                         (x.observation_id, result.run_id, x.source_id, x.asset_id, x.field_path, _json(x))
-                        for x in result.observations
+                        for x in observations
                     ],
                 )
                 cursor.executemany(
                     "INSERT INTO configurations VALUES (%s,%s,%s,%s,%s::jsonb)",
                     [
                         (x.configuration_id, result.run_id, x.product_id, x.rank, _json(x))
-                        for x in result.configurations
+                        for x in configurations
                     ],
                 )
                 cursor.executemany(
@@ -417,7 +510,7 @@ class PostgresRepository:
                             x["edge_id"], result.run_id, x["source_node"], x["relation"],
                             x["target_node"], _json(x.get("properties", {})),
                         )
-                        for x in result.graph_edges
+                        for x in graph_edges
                     ],
                 )
             connection.commit()
