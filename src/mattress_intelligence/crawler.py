@@ -7,10 +7,14 @@ import hashlib
 import heapq
 import io
 import re
+import shutil
+import ssl
+import subprocess
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -42,6 +46,32 @@ NON_PRODUCT_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 PRODUCT_DETAIL_PATH_RE = re.compile(r"/(?:products?|shop|mattress(?:es)?)/[^/?#]+", re.IGNORECASE)
+
+
+def _ca_bundle_path() -> str | None:
+    try:
+        import certifi
+    except ImportError:  # pragma: no cover - editable install supplies the dependency.
+        return None
+    return certifi.where()
+
+
+def _verified_tls_contexts() -> tuple[tuple[str, ssl.SSLContext], ...]:
+    """Build native-trust first, Certifi/OpenSSL second."""
+
+    contexts: list[tuple[str, ssl.SSLContext]] = []
+    try:
+        import truststore
+    except ImportError:  # pragma: no cover - editable install supplies it.
+        pass
+    else:
+        contexts.append(
+            ("native_trust", truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+        )
+    contexts.append(
+        ("certifi", ssl.create_default_context(cafile=_ca_bundle_path()))
+    )
+    return tuple(contexts)
 
 
 class FetchError(RuntimeError):
@@ -143,6 +173,27 @@ class HttpFetcher:
         self.object_store: ObjectStore = build_object_store(settings)
         self._robots: dict[str, RobotFileParser] = {}
         self._last_request_at: dict[str, float] = {}
+        self._ssl_contexts = _verified_tls_contexts()
+
+    def _open_verified(self, request: Request) -> tuple[Any, str]:
+        certificate_errors: list[str] = []
+        for backend, context in self._ssl_contexts:
+            try:
+                response = urlopen(
+                    request,
+                    timeout=self.settings.request_timeout_seconds,
+                    context=context,
+                )
+            except URLError as exc:
+                if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
+                    raise
+                certificate_errors.append(f"{backend}: {exc}")
+                continue
+            return response, backend
+        raise URLError(
+            "; ".join(certificate_errors)
+            or "No verified Python TLS context was available"
+        )
 
     def _origin(self, url: str) -> str:
         split = urlsplit(url)
@@ -159,7 +210,8 @@ class HttpFetcher:
                 robots_url,
                 headers={"User-Agent": self.settings.user_agent, "Accept": "text/plain,*/*;q=0.1"},
             )
-            with urlopen(request, timeout=self.settings.request_timeout_seconds) as response:
+            response, _ = self._open_verified(request)
+            with response:
                 body = response.read(1_000_000).decode("utf-8", errors="replace")
             parser.parse(body.splitlines())
         except (HTTPError, URLError, TimeoutError, ValueError):
@@ -178,6 +230,81 @@ class HttpFetcher:
             time.sleep(remaining)
         self._last_request_at[host] = time.monotonic()
 
+    def fetch_with_system_curl(self, url: str) -> FetchedDocument:
+        """Retry verified HTTPS with the operating system's curl trust stack."""
+
+        curl = shutil.which("curl")
+        if curl is None:
+            raise FetchError("System curl is unavailable")
+        with tempfile.NamedTemporaryFile(prefix="brixta-fetch-", suffix=".bin") as handle:
+            command = [
+                curl,
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                str(max(1, int(self.settings.request_timeout_seconds))),
+                "--user-agent",
+                self.settings.user_agent,
+                "--header",
+                (
+                    "Accept: text/html,application/xhtml+xml,application/pdf,"
+                    "application/xml;q=0.9,*/*;q=0.5"
+                ),
+                "--output",
+                handle.name,
+                "--write-out",
+                "%{http_code}\n%{url_effective}\n%{content_type}",
+                url,
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.settings.request_timeout_seconds + 5,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise FetchError(f"Verified curl fallback failed: {exc}") from exc
+            if completed.returncode != 0:
+                detail = clean_text(completed.stderr) or f"curl exit {completed.returncode}"
+                raise FetchError(f"Verified curl fallback failed: {detail}")
+            metadata = completed.stdout.splitlines()
+            if len(metadata) < 3:
+                raise FetchError("Verified curl fallback returned incomplete metadata")
+            try:
+                status = int(metadata[0])
+            except ValueError as exc:
+                raise FetchError("Verified curl fallback returned an invalid HTTP status") from exc
+            final_url = canonicalize_url(metadata[1] or url)
+            content_type = metadata[2].strip() or "application/octet-stream"
+            handle.seek(0)
+            body = handle.read(self.settings.max_download_bytes + 1)
+
+        if len(body) > self.settings.max_download_bytes:
+            raise FetchError(
+                "Response exceeds "
+                f"MATTRESS_INTEL_MAX_DOWNLOAD_BYTES={self.settings.max_download_bytes}"
+            )
+        stored = self.object_store.put_bytes(
+            body,
+            content_type=content_type,
+            source_url=final_url,
+            namespace="documents",
+        )
+        return FetchedDocument(
+            url=final_url,
+            status=status,
+            content_type=content_type,
+            body=body,
+            retrieved_at_epoch=time.time(),
+            artifact_path=stored.local_path,
+            object_uri=stored.object_uri,
+            capture_method="curl_verified_tls",
+        )
+
     def fetch(self, url: str) -> FetchedDocument:
         canonical_url = canonicalize_url(url)
         if not self.allowed(canonical_url):
@@ -191,8 +318,10 @@ class HttpFetcher:
                 "Accept-Encoding": "identity",
             },
         )
+        tls_backend = "unknown"
         try:
-            with urlopen(request, timeout=self.settings.request_timeout_seconds) as response:
+            response, tls_backend = self._open_verified(request)
+            with response:
                 status = int(getattr(response, "status", 200))
                 final_url = canonicalize_url(response.geturl())
                 content_type = response.headers.get_content_type()
@@ -202,7 +331,9 @@ class HttpFetcher:
                 body = response.read(self.settings.max_download_bytes + 1)
         except HTTPError as exc:
             raise FetchError(f"HTTP {exc.code}") from exc
-        except (URLError, TimeoutError, ValueError) as exc:
+        except URLError as exc:
+            raise FetchError(str(exc)) from exc
+        except (TimeoutError, ValueError) as exc:
             raise FetchError(str(exc)) from exc
         if len(body) > self.settings.max_download_bytes:
             raise FetchError(f"Response exceeds MATTRESS_INTEL_MAX_DOWNLOAD_BYTES={self.settings.max_download_bytes}")
@@ -217,7 +348,7 @@ class HttpFetcher:
             retrieved_at_epoch=time.time(),
             artifact_path=stored.local_path,
             object_uri=stored.object_uri,
-            capture_method="http",
+            capture_method=f"http_{tls_backend}",
         )
 
     def robots_sitemaps(self, base_url: str) -> list[str]:
@@ -442,24 +573,56 @@ class EvidenceFetcher:
 
     def fetch(self, url: str) -> FetchedDocument:
         lower = url.casefold()
-        # Preserve binary/XML fidelity through the local fetcher.
-        if lower.endswith((".pdf", ".xml", ".xml.gz", "/robots.txt")):
+        # Preserve XML fidelity through the local fetcher.
+        if lower.endswith((".xml", ".xml.gz", "/robots.txt")):
             return self.primary.fetch(url)
-        attempts = (
-            ("firecrawl", self._firecrawl_fetch),
-            ("jina", self._jina_fetch),
-            ("local", self.primary.fetch),
-        )
-        if self.settings.capture_strategy == "local_first":
-            attempts = (attempts[2], attempts[1], attempts[0])
+        path = urlsplit(url).path.casefold()
+        expected_pdf = lower.endswith(".pdf") or "downloadpfdfile" in path
+        # Preserve the original binary whenever possible. Legacy regulatory
+        # portals can have incomplete TLS chains, so readable-service fallbacks
+        # are attempted without ever disabling certificate verification.
+        service_attempts: list[
+            tuple[str, Callable[[str], FetchedDocument]]
+        ] = []
+        if self.reader is not None:
+            service_attempts.append(("jina", self._jina_fetch))
+        if self.firecrawl is not None:
+            service_attempts.append(("firecrawl", self._firecrawl_fetch))
+        local_attempt = ("local", self.primary.fetch)
+        if expected_pdf or self.settings.capture_strategy == "local_first":
+            attempts = (local_attempt, *service_attempts)
+        else:
+            attempts = (*reversed(service_attempts), local_attempt)
         errors: list[str] = []
+        local_certificate_failure = False
         for name, method in attempts:
             try:
                 document = method(url)
             except FetchError as exc:
                 errors.append(f"{name}: {exc}")
+                if (
+                    name == "local"
+                    and "CERTIFICATE_VERIFY_FAILED" in str(exc)
+                ):
+                    local_certificate_failure = True
                 continue
-            text_length = len(document.extracted_text(max_characters=20_000))
+            try:
+                text_length = len(document.extracted_text(max_characters=20_000))
+            except FetchError as exc:
+                errors.append(f"{name}: {exc}")
+                continue
+            if expected_pdf:
+                actual_pdf = document.body.lstrip().startswith(b"%PDF")
+                readable_fallback = (
+                    "markdown" in document.content_type.casefold()
+                    and text_length >= 100
+                )
+                if not actual_pdf and not readable_fallback:
+                    errors.append(
+                        f"{name}: expected PDF content but received "
+                        f"{document.content_type or 'an unknown media type'}"
+                    )
+                    continue
             if (
                 name == "local"
                 and self.settings.jina_reader_on_thin_page
@@ -471,6 +634,22 @@ class EvidenceFetcher:
                 except FetchError:
                     pass
             return document
+        if local_certificate_failure:
+            try:
+                document = self.primary.fetch_with_system_curl(url)
+                if expected_pdf:
+                    if not document.body.lstrip().startswith(b"%PDF"):
+                        raise FetchError(
+                            "expected PDF content but verified curl received "
+                            f"{document.content_type or 'an unknown media type'}"
+                        )
+                    return document
+                text_length = len(document.extracted_text(max_characters=20_000))
+                if text_length < 1 and document.content_type.casefold().startswith("text/"):
+                    raise FetchError("verified curl returned empty readable content")
+                return document
+            except FetchError as exc:
+                errors.append(f"curl-last-resort: {exc}")
         raise FetchError("; ".join(errors) or "All capture methods failed")
 
     def close(self) -> None:

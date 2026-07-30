@@ -19,7 +19,7 @@ celery_app = Celery(
     "mattress_intelligence",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["mattress_intelligence.tasks"],
+    include=["mattress_intelligence.tasks", "cement_intelligence.tasks"],
 )
 celery_app.conf.update(
     task_serializer="json",
