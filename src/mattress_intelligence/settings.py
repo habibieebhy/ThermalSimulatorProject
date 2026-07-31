@@ -231,7 +231,8 @@ class Settings:
 
     user_agent: str = field(
         default_factory=lambda: os.getenv(
-            "MATTRESS_INTEL_USER_AGENT", "BRIXTA-Mattress-Intelligence/1.6.1 (+evidence-research)"
+            "MATTRESS_INTEL_USER_AGENT",
+            "BRIXTA-Evidence-Discovery/2.0 (+public-evidence-research)",
         )
     )
     request_timeout_seconds: float = field(

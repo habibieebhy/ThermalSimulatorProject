@@ -16,10 +16,14 @@ visibility_timeout = max(
 )
 
 celery_app = Celery(
-    "mattress_intelligence",
+    "brixta_evidence_discovery",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["mattress_intelligence.tasks", "cement_intelligence.tasks"],
+    include=[
+        "mattress_intelligence.tasks",
+        "cement_intelligence.tasks",
+        "evidence_discovery.tasks",
+    ],
 )
 celery_app.conf.update(
     task_serializer="json",

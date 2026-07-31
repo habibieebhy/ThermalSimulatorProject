@@ -313,9 +313,25 @@ class CementIntakeResult:
             "discovery_run_id": self.discovery_run_id,
             "plant_candidate_id": self.plant_candidate_id,
             "output_directory": self.output_directory,
+            "capture_provider": self.capture_provider,
             "successful_count": self.successful_count,
             "failed_count": self.failed_count,
             "review_count": self.review_count,
             "captured": [item.to_dict() for item in self.captured],
             "approved_at": self.approved_at,
         }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "CementIntakeResult":
+        return cls(
+            intake_id=str(value["intake_id"]),
+            discovery_run_id=str(value["discovery_run_id"]),
+            plant_candidate_id=str(value["plant_candidate_id"]),
+            output_directory=str(value["output_directory"]),
+            capture_provider=str(value.get("capture_provider") or "services"),
+            captured=[
+                CapturedEvidence(**dict(item))
+                for item in value.get("captured") or []
+            ],
+            approved_at=str(value.get("approved_at") or utc_now_iso()),
+        )

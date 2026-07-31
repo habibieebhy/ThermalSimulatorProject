@@ -972,7 +972,7 @@ DOCUMENT TEXT:
         prompt: str,
         schema_name: str,
         schema: dict,
-        reasoning_effort: str = "medium",
+        reasoning_effort: str | None = None,
     ) -> dict:
         encoded = base64.b64encode(image_bytes).decode("ascii")
         data_url = f"data:{content_type.split(';', 1)[0]};base64,{encoded}"
@@ -989,9 +989,10 @@ DOCUMENT TEXT:
                 }
             ],
             "text": {"format": _json_schema_format(schema_name, schema)},
-            "reasoning": {"effort": reasoning_effort},
             "store": False,
         }
+        if reasoning_effort is not None:
+            payload["reasoning"] = {"effort": reasoning_effort}
         return _extract_json_text(self._response_text(self._request(payload)))
 
     def recognize_image(
@@ -1037,7 +1038,7 @@ Perform a forensic reading of this mattress-related image.
             prompt=prompt,
             schema_name="mattress_forensic_visual_evidence",
             schema=VISION_EVIDENCE_SCHEMA,
-            reasoning_effort="medium",
+            reasoning_effort=None,
         )
 
     def verify_image_analysis(

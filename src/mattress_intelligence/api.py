@@ -17,7 +17,7 @@ from .settings import Settings
 def create_app() -> FastAPI:
     settings = Settings()
     settings.ensure_directories()
-    app = FastAPI(title="BRIXTA Mattress Intelligence API", version="1.6.1")
+    app = FastAPI(title="BRIXTA Mattress Intelligence API", version="2.0.0")
     pipeline = MattressIntelligencePipeline(settings)
     jobs = ResearchJobStore.from_settings(settings)
 

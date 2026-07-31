@@ -407,22 +407,6 @@ class CandidateLayer(BaseModel):
     conductivity_w_mk: float = Field(gt=0)
     specific_heat_j_kgk: float = Field(gt=0)
 
-class SimulationScreeningResult(BaseModel):
-    """Comparative passive thermal screening metrics for one configuration."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    configuration_id: str
-
-    thermal_resistance_m2k_w: float = Field(ge=0.0)
-    areal_heat_capacity_kj_m2k: float = Field(ge=0.0)
-
-    estimated_final_interface_temperature_c: float
-    comfort_zone_minutes: float = Field(ge=0.0)
-    peak_interface_temperature_c: float
-
-    screening_only: bool = True
-
 
 class ConfigurationCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")

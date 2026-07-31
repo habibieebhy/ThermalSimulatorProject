@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "brixta-mattress-intelligence"
-version = "1.6.1"
-description = "Distributed evidence acquisition and deterministic mattress construction intelligence"
+name = "brixta-evidence-discovery"
+version = "2.0.0"
+description = "Guided evidence discovery for mattress, cement, and open research campaigns"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = {text = "MIT"}

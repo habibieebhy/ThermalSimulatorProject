@@ -17,10 +17,8 @@ from cement_intelligence.storage import (
     build_cement_repository,
     import_existing_cement_outputs,
 )
+from evidence_discovery.jobs import CampaignJobStore
 from mattress_intelligence.settings import Settings
-
-
-st.set_page_config(page_title="Database Explorer", page_icon="🗄️", layout="wide")
 
 MATTRESS_TABLES = (
     "research_runs",
@@ -38,6 +36,7 @@ settings = Settings()
 settings.ensure_directories()
 cement_repository = build_cement_repository(settings)
 job_store = CementJobStore.from_settings(settings)
+campaign_job_store = CampaignJobStore.from_settings(settings)
 
 
 def _sqlite_read_connection(path: Path) -> sqlite3.Connection:
@@ -69,7 +68,10 @@ def _main_table_counts() -> dict[str, int]:
                     if table not in available:
                         continue
                     cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                    counts[table] = int(cursor.fetchone()[0])
+                    count_row = cursor.fetchone()
+                    counts[table] = (
+                        int(count_row[0]) if count_row is not None else 0
+                    )
                 return counts
 
     with closing(_sqlite_read_connection(settings.database_path)) as connection:
@@ -79,13 +81,15 @@ def _main_table_counts() -> dict[str, int]:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        return {
-            table: int(
-                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            )
-            for table in MAIN_TABLES
-            if table in available
-        }
+        counts: dict[str, int] = {}
+        for table in MAIN_TABLES:
+            if table not in available:
+                continue
+            count_row = connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()
+            counts[table] = int(count_row[0]) if count_row is not None else 0
+        return counts
 
 
 def _main_table_rows(table: str, limit: int) -> list[dict[str, Any]]:
@@ -201,7 +205,13 @@ def live_database_view() -> None:
     )
     st.dataframe(count_frame, hide_index=True, use_container_width=True)
 
-    research_tab, jobs_tab = st.tabs(("Research database", "Celery job ledger"))
+    research_tab, jobs_tab, campaign_jobs_tab = st.tabs(
+        (
+            "Research database",
+            "Cement job ledger",
+            "Open-campaign job ledger",
+        )
+    )
     with research_tab:
         available = [table for table in MAIN_TABLES if table in counts]
         if not available:
@@ -248,6 +258,50 @@ def live_database_view() -> None:
             )
             st.json(
                 next(item for item in jobs if item["job_id"] == selected_job),
+                expanded=False,
+            )
+
+    with campaign_jobs_tab:
+        campaign_jobs = [
+            job.model_dump()
+            for job in campaign_job_store.list(limit=500)
+        ]
+        if not campaign_jobs:
+            st.info("No open research campaign jobs have been recorded.")
+        else:
+            campaign_frame = pd.DataFrame(
+                [
+                    {
+                        "job_id": item["job_id"],
+                        "job_type": item["job_type"],
+                        "campaign": item["request"].get("campaign_name")
+                        or item["request"].get("campaign_id"),
+                        "status": item["status"],
+                        "stage": item["stage"],
+                        "progress": item["progress"],
+                        "submitted_at": item["submitted_at"],
+                        "completed_at": item["completed_at"],
+                        "output_dir": item["output_dir"],
+                        "error": item["error"],
+                    }
+                    for item in campaign_jobs
+                ]
+            )
+            st.dataframe(
+                campaign_frame,
+                hide_index=True,
+                use_container_width=True,
+            )
+            selected_campaign_job = st.selectbox(
+                "Inspect complete campaign job",
+                options=[item["job_id"] for item in campaign_jobs],
+            )
+            st.json(
+                next(
+                    item
+                    for item in campaign_jobs
+                    if item["job_id"] == selected_campaign_job
+                ),
                 expanded=False,
             )
 

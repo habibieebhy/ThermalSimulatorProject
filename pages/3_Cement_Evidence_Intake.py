@@ -20,13 +20,6 @@ from cement_intelligence.tasks import (
 )
 from mattress_intelligence.settings import Settings
 
-
-st.set_page_config(
-    page_title="Cement Evidence Intake",
-    page_icon="🏭",
-    layout="wide",
-)
-
 settings = Settings()
 settings.ensure_directories()
 job_store = CementJobStore.from_settings(settings)
