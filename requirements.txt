@@ -1,4 +1,7 @@
 absl-py==2.5.0
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
 altair==6.2.2
 amqp==5.3.1
 annotated-doc==0.0.4
@@ -7,9 +10,10 @@ anyio==4.14.2
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
 attrs==26.1.0
+beautifulsoup4==4.15.0
 billiard==4.2.4
 blinker==1.9.0
--e git+https://github.com/habibieebhy/ThermalSimulatorVansvardhanProject.git@d4ed091beb840f68a2dedcab2674fc68c5cab788#egg=brixta_mattress_intelligence
+-e git+https://github.com/habibieebhy/BrixtaCrawler.git@de3b57367a55ff2e65f13e288f9c87e0ac6021ff#egg=brixta_mattress_intelligence
 cachetools==7.1.4
 celery==5.6.3
 certifi==2026.6.17
@@ -22,12 +26,16 @@ click-repl==0.3.0
 contourpy==1.3.3
 cycler==0.12.1
 fastapi==0.139.2
+firecrawl-py==4.41.0
 fonttools==4.63.0
+frozenlist==1.8.0
 gitdb==4.0.12
 GitPython==3.1.53
 greenlet==3.5.3
 h11==0.16.0
+httpcore==1.0.9
 httptools==0.8.0
+httpx==0.28.1
 idna==3.18
 immutabledict==4.3.1
 itsdangerous==2.2.0
@@ -41,7 +49,9 @@ lxml==6.1.1
 MarkupSafe==3.0.3
 matplotlib==3.11.1
 minio==7.2.20
+multidict==6.7.1
 narwhals==2.24.0
+nest-asyncio==1.6.0
 numpy==2.5.1
 ortools==9.15.6755
 packaging==26.2
@@ -49,6 +59,7 @@ pandas==3.0.3
 pillow==12.3.0
 playwright==1.61.0
 prompt_toolkit==3.0.52
+propcache==0.5.2
 protobuf==6.33.6
 psycopg==3.3.4
 psycopg-binary==3.3.4
@@ -76,6 +87,7 @@ scipy==1.18.0
 setuptools==83.0.0
 six==1.17.0
 smmap==5.0.3
+soupsieve==2.9.2
 starlette==1.3.1
 streamlit==1.59.2
 tenacity==9.1.4
@@ -88,10 +100,10 @@ tzlocal==5.4.4
 urllib3==2.7.0
 uvicorn==0.51.0
 uvloop==0.22.1
-vansvardhan-mattress-research-lab @ file:///Users/zaheerabbas/mattress-thermal-prototype
 vine==5.1.0
 watchfiles==1.2.0
 wcwidth==0.8.2
 websockets==16.1.1
 wheel==0.47.0
 xlsxwriter==3.2.9
+yarl==1.24.5
